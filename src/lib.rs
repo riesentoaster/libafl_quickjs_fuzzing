@@ -12,34 +12,34 @@ use std::{
 };
 
 use libafl::{
-    bolts::{
-        core_affinity::Cores,
-        current_nanos,
-        launcher::Launcher,
-        rands::StdRand,
-        shmem::{ShMemProvider, StdShMemProvider},
-        tuples::tuple_list,
-    },
-    corpus::{CachedOnDiskCorpus, Corpus, OnDiskCorpus},
-    events::EventConfig,
-    executors::{inprocess::InProcessExecutor, ExitKind, TimeoutExecutor},
+    corpus::{CachedOnDiskCorpus, OnDiskCorpus},
+    events::{ClientDescription, EventConfig, Launcher},
+    executors::{inprocess::InProcessExecutor, ExitKind},
     feedback_or, feedback_or_fast,
     feedbacks::{CrashFeedback, MaxMapFeedback, TimeFeedback, TimeoutFeedback},
-    fuzzer::{Fuzzer, StdFuzzer},
+    fuzzer::{BloomInputFilter, Evaluator, Fuzzer, StdFuzzerBuilder},
     generators::{Generator, NautilusContext, NautilusGenerator},
     inputs::{
-        EncodedInput, Input, InputDecoder, InputEncoder, NaiveTokenizer, TokenInputEncoderDecoder,
+        EncodedInput, Input, InputDecoder, InputEncoder, NaiveTokenizer, NautilusInput,
+        NopBytesConverter, TokenInputEncoderDecoder,
     },
     monitors::MultiMonitor,
-    mutators::{encoded_mutations::encoded_mutations, StdScheduledMutator},
-    observers::{HitcountsMapObserver, StdMapObserver, TimeObserver},
+    mutators::{encoded_mutations::encoded_mutations, HavocScheduledMutator},
+    observers::{CanTrack, HitcountsMapObserver, StdMapObserver, TimeObserver},
     schedulers::{IndexesLenTimeMinimizerScheduler, QueueScheduler},
     stages::mutational::StdMutationalStage,
-    state::{HasCorpus, StdState},
-    Error, Evaluator,
+    state::{NopState, StdState},
+    Error,
+};
+use libafl_bolts::{
+    core_affinity::Cores,
+    current_nanos,
+    rands::StdRand,
+    shmem::{ShMemProvider, StdShMemProvider},
+    tuples::tuple_list,
 };
 
-use libafl_targets::{libfuzzer_initialize, libfuzzer_test_one_input, EDGES_MAP, MAX_EDGES_NUM};
+use libafl_targets::{libfuzzer_initialize, libfuzzer_test_one_input, EDGES_MAP, MAX_EDGES_FOUND};
 
 /// Parses a millseconds int into a [`Duration`], used for commandline arg parsing
 fn timeout_from_millis_str(time: &str) -> Result<Duration, Error> {
@@ -66,7 +66,8 @@ struct Opt {
         short = 'p',
         long,
         help = "Choose the broker TCP port, default is 1337",
-        name = "PORT"
+        name = "PORT",
+        default_value = "1337"
     )]
     broker_port: u16,
 
@@ -99,6 +100,12 @@ struct Opt {
         default_value = "1000"
     )]
     timeout: Duration,
+
+    #[arg(short, long, help = "Set the stdout file", name = "STDOUT_FILE")]
+    stdout_file: Option<PathBuf>,
+
+    #[arg(short, long, help = "Set the stderr file", name = "STDERR_FILE")]
+    stderr_file: Option<PathBuf>,
 }
 
 const NUM_GENERATED: usize = 4096;
@@ -117,7 +124,7 @@ pub fn libafl_main() {
     initial_dir.push("initial");
     fs::create_dir_all(&initial_dir).unwrap();
 
-    let context = NautilusContext::from_file(64, "grammar.json");
+    let context = NautilusContext::from_file(64, "grammar.json").unwrap();
     let mut tokenizer = NaiveTokenizer::default();
     let mut encoder_decoder = TokenInputEncoderDecoder::new();
     let mut initial_inputs = vec![];
@@ -139,7 +146,7 @@ pub fn libafl_main() {
         let input = EncodedInput::from_file(repro).unwrap();
 
         let args: Vec<String> = env::args().collect();
-        if libfuzzer_initialize(&args) == -1 {
+        if unsafe { libfuzzer_initialize(&args) } == -1 {
             println!("Warning: LLVMFuzzerInitialize failed with -1");
         }
 
@@ -148,7 +155,7 @@ pub fn libafl_main() {
         unsafe {
             println!("Testcase: {}", std::str::from_utf8_unchecked(&bytes));
         }
-        libfuzzer_test_one_input(&bytes);
+        unsafe { libfuzzer_test_one_input(&bytes) };
 
         return;
     }
@@ -157,7 +164,9 @@ pub fn libafl_main() {
 
     let mut bytes = vec![];
     for i in 0..NUM_GENERATED {
-        let nautilus = generator.generate(&mut ()).unwrap();
+        let nautilus = generator
+            .generate(&mut NopState::<NautilusInput>::new())
+            .unwrap();
         nautilus.unparse(&context, &mut bytes);
 
         let mut file = fs::File::create(initial_dir.join(format!("id_{i}"))).unwrap();
@@ -178,108 +187,135 @@ pub fn libafl_main() {
 
     let stats = MultiMonitor::new(|s| println!("{s}"));
 
-    let mut run_client = |state: Option<StdState<_, _, _, _>>, mut restarting_mgr, _core_id| {
-        let mut objective_dir = opt.output.clone();
-        objective_dir.push("crashes");
-        let mut corpus_dir = opt.output.clone();
-        corpus_dir.push("corpus");
+    let mut run_client =
+        |state: Option<StdState<_, _, _, _>>, mut restarting_mgr, core_id: ClientDescription| {
+            let mut objective_dir = opt.output.clone();
+            objective_dir.push("crashes");
+            let mut corpus_dir = opt.output.clone();
+            corpus_dir.push(format!(
+                "corpus_{}_{}",
+                core_id.core_id().0,
+                core_id.overcommit_id()
+            ));
 
-        // Create an observation channel using the coverage map
-        let edges = unsafe { &mut EDGES_MAP[0..MAX_EDGES_NUM] };
-        let edges_observer = HitcountsMapObserver::new(StdMapObserver::new("edges", edges));
+            // Create an observation channel using the coverage map
+            let edges = unsafe { &mut EDGES_MAP[0..MAX_EDGES_FOUND] };
+            let edges_observer =
+                HitcountsMapObserver::new(unsafe { StdMapObserver::new("edges", edges) })
+                    .track_indices();
 
-        // Create an observation channel to keep track of the execution time
-        let time_observer = TimeObserver::new("time");
+            // Create an observation channel to keep track of the execution time
+            let time_observer = TimeObserver::new("time");
 
-        // Feedback to rate the interestingness of an input
-        // This one is composed by two Feedbacks in OR
-        let mut feedback = feedback_or!(
-            // New maximization map feedback linked to the edges observer and the feedback state
-            MaxMapFeedback::new_tracking(&edges_observer, true, false),
-            // Time feedback, this one does not need a feedback state
-            TimeFeedback::new_with_observer(&time_observer)
-        );
+            // Feedback to rate the interestingness of an input
+            // This one is composed by two Feedbacks in OR
+            let mut feedback = feedback_or!(
+                // New maximization map feedback linked to the edges observer and the feedback state
+                MaxMapFeedback::new(&edges_observer),
+                // Time feedback, this one does not need a feedback state
+                TimeFeedback::new(&time_observer)
+            );
 
-        // A feedback to choose if an input is a solution or not
-        let mut objective = feedback_or_fast!(CrashFeedback::new(), TimeoutFeedback::new());
+            // A feedback to choose if an input is a solution or not
+            let mut objective = feedback_or_fast!(CrashFeedback::new(), TimeoutFeedback::new());
 
-        // If not restarting, create a State from scratch
-        let mut state = state.unwrap_or_else(|| {
-            StdState::new(
-                // RNG
-                StdRand::with_seed(current_nanos()),
-                // Corpus that will be evolved, we keep it in memory for performance
-                CachedOnDiskCorpus::new(corpus_dir, CORPUS_CACHE).unwrap(),
-                // Corpus in which we store solutions (crashes in this example),
-                // on disk so the user can get them after stopping the fuzzer
-                OnDiskCorpus::new(objective_dir).unwrap(),
-                &mut feedback,
-                &mut objective,
-            )
-            .unwrap()
-        });
+            // If not restarting, create a State from scratch
+            let mut state = state.unwrap_or_else(|| {
+                StdState::new(
+                    // RNG
+                    StdRand::with_seed(current_nanos()),
+                    // Corpus that will be evolved, we keep it in memory for performance
+                    CachedOnDiskCorpus::new(corpus_dir, CORPUS_CACHE).unwrap(),
+                    // Corpus in which we store solutions (crashes in this example),
+                    // on disk so the user can get them after stopping the fuzzer
+                    OnDiskCorpus::new(objective_dir).unwrap(),
+                    &mut feedback,
+                    &mut objective,
+                )
+                .unwrap()
+            });
 
-        // A minimization+queue policy to get testcasess from the corpus
-        let scheduler = IndexesLenTimeMinimizerScheduler::new(QueueScheduler::new());
+            // A minimization+queue policy to get testcasess from the corpus
+            let scheduler =
+                IndexesLenTimeMinimizerScheduler::new(&edges_observer, QueueScheduler::new());
 
-        // A fuzzer with feedbacks and a corpus scheduler
-        let mut fuzzer = StdFuzzer::new(scheduler, feedback, objective);
+            // A fuzzer with feedbacks and a corpus scheduler
+            let mut fuzzer = StdFuzzerBuilder::new()
+                .input_filter(BloomInputFilter::new(1_000_000_000, 0.001))
+                .bytes_converter(NopBytesConverter::default())
+                .build(scheduler, feedback, objective)
+                .unwrap();
 
-        // The wrapped harness function, calling out to the LLVM-style harness
-        let mut bytes = vec![];
-        let mut harness = |input: &EncodedInput| {
-            bytes.clear();
-            encoder_decoder.decode(input, &mut bytes).unwrap();
-            if *bytes.last().unwrap() != 0 {
-                bytes.push(0);
-            }
-            //unsafe {
-            //println!(">>> {}", std::str::from_utf8_unchecked(&bytes));
-            //}
-            libfuzzer_test_one_input(&bytes);
-            ExitKind::Ok
-        };
+            // The wrapped harness function, calling out to the LLVM-style harness
+            let mut bytes = vec![];
+            let mut harness = |input: &EncodedInput| {
+                bytes.clear();
+                encoder_decoder.decode(input, &mut bytes).unwrap();
+                if *bytes.last().unwrap() != 0 {
+                    bytes.push(0);
+                }
+                //unsafe {
+                //println!(">>> {}", std::str::from_utf8_unchecked(&bytes));
+                //}
+                unsafe { libfuzzer_test_one_input(&bytes) };
+                ExitKind::Ok
+            };
 
-        // Create the executor for an in-process function with one observer for edge coverage and one for the execution time
-        let mut executor = TimeoutExecutor::new(
-            InProcessExecutor::new(
+            // Create the executor for an in-process function with one observer for edge coverage and one for the execution time
+            let mut executor = InProcessExecutor::with_timeout(
                 &mut harness,
                 tuple_list!(edges_observer, time_observer),
                 &mut fuzzer,
                 &mut state,
                 &mut restarting_mgr,
-            )?,
-            opt.timeout,
-        );
+                opt.timeout,
+            )?;
 
-        // The actual target run starts here.
-        // Call LLVMFUzzerInitialize() if present.
-        let args: Vec<String> = env::args().collect();
-        if libfuzzer_initialize(&args) == -1 {
-            println!("Warning: LLVMFuzzerInitialize failed with -1");
-        }
-
-        // In case the corpus is empty (on first run), reset
-        if state.corpus().count() < 1 {
-            for input in &initial_inputs {
-                fuzzer
-                    .add_input(
-                        &mut state,
-                        &mut executor,
-                        &mut restarting_mgr,
-                        input.clone(),
-                    )
-                    .unwrap();
+            // The actual target run starts here.
+            // Call LLVMFUzzerInitialize() if present.
+            let args: Vec<String> = env::args().collect();
+            if unsafe { libfuzzer_initialize(&args) } == -1 {
+                println!("Warning: LLVMFuzzerInitialize failed with -1");
             }
-        }
 
-        // Setup a basic mutator with a mutational stage
-        let mutator = StdScheduledMutator::with_max_stack_pow(encoded_mutations(), 2);
-        let mut stages = tuple_list!(StdMutationalStage::new(mutator));
+            // In case the corpus is empty (on first run), reset
+            if state.must_load_initial_inputs() {
+                println!("Loading {} initial inputs", initial_inputs.len());
+                for input in &initial_inputs {
+                    fuzzer
+                        .add_input(
+                            &mut state,
+                            &mut executor,
+                            &mut restarting_mgr,
+                            input.clone(),
+                        )
+                        .unwrap();
+                }
+            }
 
-        fuzzer.fuzz_loop(&mut stages, &mut executor, &mut state, &mut restarting_mgr)?;
-        Ok(())
-    };
+            // Setup a basic mutator with a mutational stage
+            let mutator = HavocScheduledMutator::with_max_stack_pow(encoded_mutations(), 2);
+            let mut stages = tuple_list!(StdMutationalStage::new(mutator));
+
+            println!("Let's fuzz!");
+            fuzzer.fuzz_loop(&mut stages, &mut executor, &mut state, &mut restarting_mgr)?;
+            Ok(())
+        };
+
+    println!("launching launcher");
+
+    // Set default stdout/stderr files if not provided
+    let stdout_file = opt.stdout_file.map(|p| {
+        let mut outer = opt.output.clone();
+        outer.push(p);
+        outer.to_string_lossy().to_string()
+    });
+
+    let stderr_file = opt.stderr_file.map(|p| {
+        let mut outer = opt.output.clone();
+        outer.push(p);
+        outer.to_string_lossy().to_string()
+    });
 
     match Launcher::builder()
         .shmem_provider(shmem_provider)
@@ -289,7 +325,8 @@ pub fn libafl_main() {
         .cores(&opt.cores)
         .broker_port(opt.broker_port)
         .remote_broker_addr(opt.remote_broker_addr)
-        .stdout_file(Some("/dev/null"))
+        .stdout_file(stdout_file.as_deref())
+        .stderr_file(stderr_file.as_deref())
         .build()
         .launch()
     {
