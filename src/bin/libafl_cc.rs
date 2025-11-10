@@ -18,9 +18,10 @@ pub fn main() {
         let mut cc = ClangWrapper::new();
         if let Some(code) = cc
             .cpp(is_cpp)
+            .silence(env::var("LIBAFL_CC_VERBOSE").is_err())
             .parse_args(&args)
             .expect("Failed to parse the command line")
-            .link_staticlib(&dir, "libafl_quickjs")
+            .link_staticlib(&dir, "libafl_nautilus_fuzzer")
             .add_arg("-fsanitize-coverage=trace-pc-guard")
             .run()
             .expect("Failed to run the wrapped compiler")

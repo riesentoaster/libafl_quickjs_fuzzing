@@ -1,0 +1,56 @@
+[unix]
+cc:
+    cargo build --release --bin libafl_cc
+    cargo build --release --bin libafl_cxx
+
+CC_WRAPPER := "target/release/libafl_cc"
+CXX_WRAPPER := "target/release/libafl_cxx"
+
+[unix]
+source_tarball:
+    if [ ! -f llvm.zip ]; then \
+        curl -L https://github.com/llvm/llvm-project/archive/refs/heads/main.zip -o llvm.zip ; \
+    fi
+
+[unix]
+source: source_tarball
+    if [ ! -f llvm/README.md ]; then \
+        rm -rf llvm && \
+        unzip -q llvm.zip && \
+        mv llvm-project-main llvm ; \
+    fi
+
+[unix]
+fuzzer_lib:
+    LIBAFL_EDGES_MAP_ALLOCATED_SIZE=16777216 LIBAFL_EDGES_MAP_DEFAULT_SIZE=16777216 cargo build --release --target-dir target
+
+
+[unix]
+build: source fuzzer_lib cc
+    cd llvm && \
+    mkdir -p build && cd build && \
+    cmake -GNinja -DCMAKE_BUILD_TYPE=Release ../llvm \
+    -DLLVM_ENABLE_PROJECTS="clang;lld;clang-tools-extra" \
+    -DLLVM_ENABLE_RUNTIMES="libcxx;libcxxabi;compiler-rt" \
+    -DCMAKE_C_COMPILER="$(realpath ../../target/release/libafl_cc)" \
+    -DCMAKE_CXX_COMPILER="$(realpath ../../target/release/libafl_cxx)" \
+    -DLLVM_ENABLE_ASSERTIONS=ON \
+    -DLLVM_LIB_FUZZING_ENGINE="$(realpath ../../target/release/liblibafl_nautilus_fuzzer.a)" \
+    -DLLVM_NO_DEAD_STRIP=ON \
+    -DLLVM_EXPERIMENTAL_TARGETS_TO_BUILD=WebAssembly \
+    -DCOMPILER_RT_INCLUDE_TESTS=OFF && \
+    ninja clang-fuzzer -j $(nproc);
+
+[unix]
+run: build
+    llvm/build/bin/clang-fuzzer --grammar-file c.json
+    # -DCMAKE_C_FLAGS="-DFUZZING_BUILD_MODE_UNSAFE_FOR_PRODUCTION -fno-pie -fno-PIE" \
+    # -DCMAKE_CXX_FLAGS="-DFUZZING_BUILD_MODE_UNSAFE_FOR_PRODUCTION -fno-pie -fno-PIE" \
+    # -DLLVM_USE_SANITIZE_COVERAGE=ON \
+    # -DLLVM_USE_LINKER=lld \
+    # -DCMAKE_C_COMPILER="${CC}" \
+    # -DCMAKE_CXX_COMPILER="${CXX}" \
+    # -DCMAKE_C_FLAGS="${CFLAGS}" \
+    # -DCMAKE_CXX_FLAGS="${CXXFLAGS}" \
+    # -DLLVM_USE_SANITIZER="${LLVM_SANITIZER}" \
+

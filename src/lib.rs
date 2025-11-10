@@ -54,9 +54,9 @@ fn timeout_from_millis_str(time: &str) -> Result<Duration, Error> {
 
 #[derive(Debug, Parser)]
 #[command(
-    name = "libafl_quickjs",
-    about = "Fuzz quickjs with libafl",
-    author = "Andrea Fioraldi <andreafioraldi@gmail.com>"
+    name = "libafl_nautilus_fuzzer",
+    about = "Fuzz things with libafl_nautilus",
+    author = "Andrea Fioraldi <andreafioraldi@gmail.com>, Valentin Huber <contact@valentinhuber.me>"
 )]
 struct Opt {
     #[arg(
@@ -64,7 +64,8 @@ struct Opt {
         long,
         value_parser = Cores::from_cmdline,
         help = "Spawn a client in each of the provided cores. Broker runs in the 0th core. 'all' to select all available cores. 'none' to run a client without binding to any core. eg: '1,2-4,6' selects the cores 1,2,3,4,6.",
-        name = "CORES"
+        name = "CORES",
+        default_value = "0"
     )]
     cores: Cores,
 
@@ -112,6 +113,9 @@ struct Opt {
 
     #[arg(short, long, help = "Set the stderr file", name = "STDERR_FILE")]
     stderr_file: Option<PathBuf>,
+
+    #[arg(short, long, help = "Set the grammar file", name = "GRAMMAR_FILE")]
+    grammar_file: PathBuf,
 }
 
 const NUM_GENERATED: usize = 4096;
@@ -130,7 +134,7 @@ pub fn libafl_main() {
     initial_dir.push("initial");
     fs::create_dir_all(&initial_dir).unwrap();
 
-    let context = NautilusContext::from_file(64, "grammar.json").unwrap();
+    let context = NautilusContext::from_file(256, opt.grammar_file).unwrap();
     let mut tokenizer = NaiveTokenizer::default();
     let mut encoder_decoder = TokenInputEncoderDecoder::new();
     let mut initial_inputs = vec![];

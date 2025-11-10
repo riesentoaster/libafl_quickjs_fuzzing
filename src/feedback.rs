@@ -72,9 +72,11 @@ where
         let stringified = metadata
             .counts
             .iter()
-            .map(|c| format!("{:.3}", *c as f64 / total_hits as f64))
+            .enumerate()
+            .filter(|(_, c)| **c > 0)
+            .map(|(i, c)| format!("{}: {:.3}", i, *c as f64 / total_hits as f64))
             .collect::<Vec<String>>()
-            .join(",");
+            .join(", ");
         manager.fire(
             state,
             EventWithStats::with_current_time(
