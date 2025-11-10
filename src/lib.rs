@@ -2,6 +2,9 @@
 //! The example harness is built for libpng.
 //! This will fuzz javascript.
 
+mod feedback;
+mod observer;
+
 use clap::Parser;
 use core::time::Duration;
 use std::{
@@ -17,11 +20,11 @@ use libafl::{
     executors::{inprocess::InProcessExecutor, ExitKind},
     feedback_or, feedback_or_fast,
     feedbacks::{CrashFeedback, MaxMapFeedback, TimeFeedback, TimeoutFeedback},
-    fuzzer::{BloomInputFilter, Evaluator, Fuzzer, StdFuzzerBuilder},
+    fuzzer::{Evaluator, Fuzzer},
     generators::{Generator, NautilusContext, NautilusGenerator},
     inputs::{
         EncodedInput, Input, InputDecoder, InputEncoder, NaiveTokenizer, NautilusInput,
-        NopBytesConverter, TokenInputEncoderDecoder,
+        TokenInputEncoderDecoder,
     },
     monitors::MultiMonitor,
     mutators::{encoded_mutations::encoded_mutations, HavocScheduledMutator},
@@ -29,7 +32,7 @@ use libafl::{
     schedulers::{IndexesLenTimeMinimizerScheduler, QueueScheduler},
     stages::mutational::StdMutationalStage,
     state::{NopState, StdState},
-    Error,
+    Error, StdFuzzer,
 };
 use libafl_bolts::{
     core_affinity::Cores,
@@ -40,6 +43,9 @@ use libafl_bolts::{
 };
 
 use libafl_targets::{libfuzzer_initialize, libfuzzer_test_one_input, EDGES_MAP, MAX_EDGES_FOUND};
+use observer::CorrectnessObserver;
+
+use crate::feedback::ReportCorrectnessFeedback;
 
 /// Parses a millseconds int into a [`Duration`], used for commandline arg parsing
 fn timeout_from_millis_str(time: &str) -> Result<Duration, Error> {
@@ -207,9 +213,14 @@ pub fn libafl_main() {
             // Create an observation channel to keep track of the execution time
             let time_observer = TimeObserver::new("time");
 
+            // Custom correctness observer backed by a global no_mangle symbol
+            let correctness_observer =
+                CorrectnessObserver::new_global(format!("correctness_{}", core_id.core_id().0));
+
             // Feedback to rate the interestingness of an input
             // This one is composed by two Feedbacks in OR
             let mut feedback = feedback_or!(
+                ReportCorrectnessFeedback::new(&correctness_observer),
                 // New maximization map feedback linked to the edges observer and the feedback state
                 MaxMapFeedback::new(&edges_observer),
                 // Time feedback, this one does not need a feedback state
@@ -240,11 +251,7 @@ pub fn libafl_main() {
                 IndexesLenTimeMinimizerScheduler::new(&edges_observer, QueueScheduler::new());
 
             // A fuzzer with feedbacks and a corpus scheduler
-            let mut fuzzer = StdFuzzerBuilder::new()
-                .input_filter(BloomInputFilter::new(1_000_000_000, 0.001))
-                .bytes_converter(NopBytesConverter::default())
-                .build(scheduler, feedback, objective)
-                .unwrap();
+            let mut fuzzer = StdFuzzer::new(scheduler, feedback, objective);
 
             // The wrapped harness function, calling out to the LLVM-style harness
             let mut bytes = vec![];
@@ -264,7 +271,7 @@ pub fn libafl_main() {
             // Create the executor for an in-process function with one observer for edge coverage and one for the execution time
             let mut executor = InProcessExecutor::with_timeout(
                 &mut harness,
-                tuple_list!(edges_observer, time_observer),
+                tuple_list!(edges_observer, time_observer, correctness_observer),
                 &mut fuzzer,
                 &mut state,
                 &mut restarting_mgr,
@@ -323,8 +330,8 @@ pub fn libafl_main() {
         .monitor(stats)
         .run_client(&mut run_client)
         .cores(&opt.cores)
-        .broker_port(opt.broker_port)
-        .remote_broker_addr(opt.remote_broker_addr)
+        // .broker_port(opt.broker_port)
+        // .remote_broker_addr(opt.remote_broker_addr)
         .stdout_file(stdout_file.as_deref())
         .stderr_file(stderr_file.as_deref())
         .build()
