@@ -163,7 +163,7 @@ pub fn libafl_main() {
         let mut bytes = vec![];
         encoder_decoder.decode(&input, &mut bytes).unwrap();
         unsafe {
-            println!("Testcase: {}", std::str::from_utf8_unchecked(&bytes));
+            println!("{}", std::str::from_utf8_unchecked(&bytes));
         }
         unsafe { libfuzzer_test_one_input(&bytes) };
 
