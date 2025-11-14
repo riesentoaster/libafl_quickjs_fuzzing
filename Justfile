@@ -38,12 +38,16 @@ build: source fuzzer_lib cc
     -DLLVM_LIB_FUZZING_ENGINE="$(realpath ../../target/release/liblibafl_nautilus_fuzzer.a)" \
     -DLLVM_NO_DEAD_STRIP=ON \
     -DLLVM_EXPERIMENTAL_TARGETS_TO_BUILD=WebAssembly \
-    -DCOMPILER_RT_INCLUDE_TESTS=OFF && \
+    -DCOMPILER_RT_INCLUDE_TESTS=OFF \
+    -DCMAKE_EXE_LINKER_FLAGS="`python3-config --embed --ldflags`" && \
     ninja clang-fuzzer -j $(nproc);
 
 [unix]
 run: build
-    llvm/build/bin/clang-fuzzer --grammar-file c.json
+    llvm/build/bin/clang-fuzzer --grammar-file c.json --stdout-file /dev/null --stderr-file /dev/null --output out/nautilus
+
+run_fandango:
+    llvm/build/bin/clang-fuzzer --grammar-file c.fan
     # -DCMAKE_C_FLAGS="-DFUZZING_BUILD_MODE_UNSAFE_FOR_PRODUCTION -fno-pie -fno-PIE" \
     # -DCMAKE_CXX_FLAGS="-DFUZZING_BUILD_MODE_UNSAFE_FOR_PRODUCTION -fno-pie -fno-PIE" \
     # -DLLVM_USE_SANITIZE_COVERAGE=ON \

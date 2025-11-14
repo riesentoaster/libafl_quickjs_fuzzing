@@ -33,6 +33,7 @@ serde_json = "1.0"
 serde = { version = "1.0", features = ["derive"] }
 # TODO Include it only when building cc
 libafl_cc = { version = "0.15.3" }
+libafl-fandango-pyo3 = { git = "https://github.com/riesentoaster/libafl-fandango-pyo3" }
 clap = { version = "4.0", features = ["derive"] }
 
 [lib]

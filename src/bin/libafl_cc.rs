@@ -21,6 +21,8 @@ pub fn main() {
             .silence(env::var("LIBAFL_CC_VERBOSE").is_err())
             .parse_args(&args)
             .expect("Failed to parse the command line")
+            .link_libpython()
+            .unwrap()
             .link_staticlib(&dir, "libafl_nautilus_fuzzer")
             .add_arg("-fsanitize-coverage=trace-pc-guard")
             .run()
