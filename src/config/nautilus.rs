@@ -1,10 +1,11 @@
 use std::{fs, io::Write as _, num::NonZero};
 
 use libafl::{
+    executors::{Executor, HasObservers},
     generators::{Generator as _, NautilusContext, NautilusGenerator},
     inputs::{
-        EncodedInput, InputDecoder as _, InputEncoder as _, NaiveTokenizer, NautilusInput,
-        TokenInputEncoderDecoder,
+        BytesInput, EncodedInput, InputDecoder as _, InputEncoder as _, NaiveTokenizer,
+        NautilusInput, TokenInputEncoderDecoder,
     },
     mutators::{
         encoded_mutations, EncodedAddMutator, EncodedCopyMutator, EncodedCrossoverInsertMutator,
@@ -12,11 +13,12 @@ use libafl::{
         EncodedInsertCopyMutator, EncodedRandMutator, HavocScheduledMutator,
     },
     nonzero,
+    observers::ObserversTuple,
     schedulers::{IndexesLenTimeMinimizerScheduler, QueueScheduler},
     stages::mutational::DEFAULT_MUTATIONAL_MAX_ITERATIONS,
     state::NopState,
 };
-use libafl_bolts::tuples::tuple_list_type;
+use libafl_bolts::tuples::{tuple_list_type, RefIndexable};
 
 use crate::{
     config::{read_corpus, FuzzerConfig},
@@ -56,7 +58,7 @@ impl FuzzerConfig for NautilusConfig {
 
     type Scheduler<'a> = libafl::schedulers::MinimizerScheduler<
         QueueScheduler,
-        libafl::schedulers::LenTimeMulTestcaseScore,
+        libafl::schedulers::LenTimeMulTestcasePenalty,
         EncodedInput,
         libafl::feedbacks::MapIndexesMetadata,
         SchedulerObserver<'a>,
@@ -94,12 +96,12 @@ impl FuzzerConfig for NautilusConfig {
                 .expect("encoding failed");
             initial_inputs.push(input);
         }
-        initial_inputs.extend_from_slice(
-            &read_corpus()
-                .iter()
-                .flat_map(|x| encoder_decoder.encode(x, &mut tokenizer))
-                .collect::<Vec<_>>(),
-        );
+        // initial_inputs.extend_from_slice(
+        //     &read_corpus()
+        //         .iter()
+        //         .flat_map(|x| encoder_decoder.encode(x, &mut tokenizer))
+        //         .collect::<Vec<_>>(),
+        // );
         initial_inputs
     }
 
@@ -117,5 +119,52 @@ impl FuzzerConfig for NautilusConfig {
             bytes.push(0);
         }
         bytes.as_slice()
+    }
+}
+
+pub struct NautilusUnparsingExecutor<'a, E> {
+    init: &'a mut <NautilusConfig as FuzzerConfig>::Init,
+    inner: E,
+}
+
+impl<'a, E> NautilusUnparsingExecutor<'a, E> {
+    pub fn new(init: &'a mut <NautilusConfig as FuzzerConfig>::Init, inner: E) -> Self {
+        Self { init, inner }
+    }
+}
+
+impl<'a, E> HasObservers for NautilusUnparsingExecutor<'a, E>
+where
+    E: HasObservers,
+{
+    type Observers = E::Observers;
+
+    fn observers(&self) -> RefIndexable<&Self::Observers, Self::Observers> {
+        self.inner.observers()
+    }
+
+    fn observers_mut(&mut self) -> RefIndexable<&mut Self::Observers, Self::Observers> {
+        self.inner.observers_mut()
+    }
+}
+
+impl<'a, E, EM, S, Z> Executor<EM, EncodedInput, S, Z> for NautilusUnparsingExecutor<'a, E>
+where
+    E: Executor<EM, BytesInput, S, Z>,
+{
+    fn run_target(
+        &mut self,
+        fuzzer: &mut Z,
+        state: &mut S,
+        mgr: &mut EM,
+        input: &EncodedInput,
+    ) -> Result<libafl::executors::ExitKind, libafl::Error> {
+        let unparsed_input = NautilusConfig::run_harness(self.init, input);
+        self.inner.run_target(
+            fuzzer,
+            state,
+            mgr,
+            &BytesInput::new(unparsed_input.to_vec()),
+        )
     }
 }

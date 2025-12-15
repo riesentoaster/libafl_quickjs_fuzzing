@@ -1,0 +1,25 @@
+Diagnostics with DiagCat_None
+DiagCat_None is assigned to diagnostics that:
+Are defined outside any let CategoryName = "..." block
+Don't have an explicit category attribute (like CatInlineAsm, CatBackend, etc.)
+Common examples:
+From DiagnosticCommonKinds.td (uncategorized section):
+fatal_too_many_errors — "too many errors emitted, stopping now"
+warn_stack_exhausted — stack exhaustion warning
+Most note_* diagnostics (context/continuation notes):
+note_declared_at
+note_previous_definition
+note_forward_declaration
+note_matching
+etc.
+From DiagnosticFrontendKinds.td (uncategorized):
+err_fe_error_opening — file opening errors
+err_fe_error_reading — file reading errors
+err_fe_error_reading_stdin — stdin reading errors
+err_fe_linking_module — module linking errors
+Various warnings/notes without explicit categories
+General pattern:
+Generic infrastructure errors (file I/O, fatal errors)
+Most note diagnostics (contextual information)
+Diagnostics that don't fit into specific phases (lexical, parsing, semantic, etc.)
+In your fuzzing context, these map to step 1, indicating errors that occur before or outside the typical compilation phases.

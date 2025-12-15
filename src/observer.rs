@@ -17,6 +17,14 @@ pub struct CorrectnessObserver {
 }
 
 impl CorrectnessObserver {
+    pub fn new(step_ptr: &mut [u8], name: String) -> Self {
+        Self {
+            step_ptr: step_ptr.as_mut_ptr().cast(),
+            step: 0,
+            name: Cow::Owned(name),
+        }
+    }
+
     pub fn new_global(name: String) -> Self {
         let ptr = &raw mut __afl_correctness_step;
         Self {

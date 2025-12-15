@@ -1,5 +1,6 @@
 target
-out
+corpus*
+initial
 Cargo.lock
 vendor
 
@@ -48,3 +49,5 @@ llvm
 llvm.zip
 
 *.tmp
+out/**/corpus*
+out/**/initial

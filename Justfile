@@ -5,6 +5,22 @@ cc:
 
 CC_WRAPPER := "target/release/libafl_cc"
 CXX_WRAPPER := "target/release/libafl_cxx"
+COVERAGE_FILE := "target/release/coverage.o"
+
+[unix]
+coverage_collector: fuzzer_lib
+    clang -c -o "./target/release/coverage.o" coverage.c
+
+[unix]
+preloads:
+    cargo build --release --package get_guard_num
+    cargo build --release --package setup_guard_redirection
+
+[unix]
+coverage_size: preloads build_manual
+    LD_PRELOAD="./target/release/libget_guard_num.so" ./llvm/build/bin/clang
+
+
 
 [unix]
 source_tarball:
@@ -24,6 +40,26 @@ source: source_tarball
 fuzzer_lib:
     LIBAFL_EDGES_MAP_ALLOCATED_SIZE=16777216 LIBAFL_EDGES_MAP_DEFAULT_SIZE=16777216 cargo build --release --target-dir target
 
+[unix]
+build_manual: source fuzzer_lib coverage_collector
+    cd llvm && \
+    mkdir -p build && cd build && \
+    cmake -GNinja -DCMAKE_BUILD_TYPE=Release ../llvm \
+    -DLLVM_ENABLE_PROJECTS="clang;lld;clang-tools-extra" \
+    -DLLVM_ENABLE_RUNTIMES="libcxx;libcxxabi;compiler-rt" \
+    -DCMAKE_C_FLAGS="-fsanitize-coverage=trace-pc-guard" \
+    -DCMAKE_CXX_FLAGS="-fsanitize-coverage=trace-pc-guard" \
+    -DCMAKE_EXE_LINKER_FLAGS="$(realpath ../../target/release/coverage.o)" \
+    -DLLVM_ENABLE_ASSERTIONS=ON && \
+    ninja clang -j $(nproc);
+
+run_manual: build_manual preloads
+    ./target/release/libafl_nautilus_fuzzer \
+    --grammar-file c.fan
+
+run_manual_no_compile_clang: fuzzer_lib preloads
+    ./target/release/libafl_nautilus_fuzzer \
+    --grammar-file c.fan
 
 [unix]
 build: source fuzzer_lib cc

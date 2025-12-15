@@ -32,12 +32,12 @@ struct CorrectnessMetadata {
     counts: Vec<usize>,
 }
 
-static MAX_CORRECTNESS_STEPS: usize = 25;
+static MAX_CORRECTNESS_STEPS: usize = 1 << 10;
 
 impl CorrectnessMetadata {
     pub fn new() -> Self {
         Self {
-            counts: vec![0; MAX_CORRECTNESS_STEPS],
+            counts: vec![0; MAX_CORRECTNESS_STEPS + 1],
         }
     }
 }
@@ -62,12 +62,12 @@ where
         let step = observer.step();
         if step == 0 || step > MAX_CORRECTNESS_STEPS {
             // Skip if step is invalid
-            return Err(Error::illegal_state(format!(
-                "Step {} is out of bounds",
-                step
-            )));
+            // return Err(Error::illegal_state(format!(
+            //     "Step {} is out of bounds",
+            //     step
+            // )));
         }
-        metadata.counts[step - 1] += 1;
+        metadata.counts[step] += 1;
         let total_hits = metadata.counts.iter().sum::<usize>();
         let stringified = metadata
             .counts

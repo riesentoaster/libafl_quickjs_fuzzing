@@ -2,26 +2,32 @@
 //! The example harness is built for libpng.
 //! This will fuzz javascript.
 
-pub mod config;
+mod config;
+mod executor;
 mod feedback;
 mod observer;
 
 use clap::Parser;
 use core::time::Duration;
-use std::{env, fs, net::SocketAddr, path::PathBuf};
+use std::{borrow::Cow, env, fs, net::SocketAddr, path::PathBuf};
 
 use libafl::{
     corpus::{CachedOnDiskCorpus, OnDiskCorpus},
     events::{
         ClientDescription, EventConfig, EventRestarter, Launcher, LlmpRestartingEventManager,
     },
-    executors::{inprocess::InProcessExecutor, ExitKind},
     feedback_or, feedback_or_fast,
-    feedbacks::{CrashFeedback, MaxMapFeedback, TimeFeedback, TimeoutFeedback},
+    feedbacks::{
+        stdio::{StdErrToMetadataFeedback, StdOutToMetadataFeedback},
+        CrashFeedback, MaxMapFeedback, TimeFeedback, TimeoutFeedback,
+    },
     fuzzer::{Evaluator, Fuzzer},
     monitors::{MultiMonitor, OnDiskJsonMonitor},
-    mutators::{havoc_mutations, HavocScheduledMutator},
-    observers::{CanTrack, HitcountsMapObserver, StdMapObserver, TimeObserver},
+    mutators::{havoc_mutations, HavocScheduledMutator, NopMutator},
+    observers::{
+        CanTrack, HitcountsMapObserver, StdErrObserver, StdMapObserver, StdOutObserver,
+        TimeObserver,
+    },
     stages::mutational::StdMutationalStage,
     state::StdState,
     Error, StdFuzzer,
@@ -30,14 +36,18 @@ use libafl_bolts::{
     core_affinity::Cores,
     current_nanos,
     rands::StdRand,
-    shmem::{ShMemProvider, StdShMemProvider},
+    shmem::{MmapShMemProvider, ShMem as _, ShMemProvider, StdShMemProvider},
     tuples::tuple_list,
+    AsSliceMut as _,
 };
 
-use libafl_targets::{libfuzzer_initialize, libfuzzer_test_one_input, EDGES_MAP, MAX_EDGES_FOUND};
 use observer::CorrectnessObserver;
 
-use crate::{config::FuzzerConfig, feedback::ReportCorrectnessFeedback};
+use crate::{
+    config::{nautilus::NautilusUnparsingExecutor, FuzzerConfig},
+    executor::{get_coverage_shmem_size, get_executor},
+    feedback::ReportCorrectnessFeedback,
+};
 
 /// Parses a millseconds int into a [`Duration`], used for commandline arg parsing
 fn timeout_from_millis_str(time: &str) -> Result<Duration, Error> {
@@ -100,24 +110,26 @@ pub struct Opt {
     )]
     timeout: Duration,
 
-    #[arg(short, long, help = "Set the stdout file", name = "STDOUT_FILE")]
+    #[arg(long, help = "Set the stdout file", name = "STDOUT_FILE")]
     stdout_file: Option<PathBuf>,
 
-    #[arg(short, long, help = "Set the stderr file", name = "STDERR_FILE")]
+    #[arg(long, help = "Set the stderr file", name = "STDERR_FILE")]
     stderr_file: Option<PathBuf>,
 
     #[arg(short, long, help = "Set the grammar file", name = "GRAMMAR_FILE")]
     grammar_file: PathBuf,
 }
 
+static TARGET_BINARY: &str = "./llvm/build/bin/clang";
+
 const NUM_GENERATED: usize = 4096;
 const CORPUS_CACHE: usize = 4096;
 
-type CurrentConfig = config::FandangoConfig;
+type CurrentConfig = config::NautilusConfig;
 /// The main fn, `no_mangle` as it is a C symbol
-#[no_mangle]
+// #[no_mangle]
 #[allow(clippy::too_many_lines)]
-pub fn libafl_main() {
+pub fn main() {
     // Registry the metadata types used in this fuzzer
     // Needed only on no_std
     //RegistryBuilder::register::<Tokens>();
@@ -184,8 +196,16 @@ pub fn libafl_main() {
         let mut init = CurrentConfig::init();
         let initial_inputs = CurrentConfig::initial_inputs(&mut init, &opt);
 
-        // Create an observation channel using the coverage map
-        let edges = unsafe { &mut EDGES_MAP[0..MAX_EDGES_FOUND] };
+        let guard_num = get_coverage_shmem_size(TARGET_BINARY)?;
+
+        let mut provider = MmapShMemProvider::default();
+        let mut shmem = provider
+            .new_shmem(guard_num + size_of::<usize>())?
+            .persist()?;
+        let shmem_description = shmem.description();
+
+        let (step, edges) = shmem.as_slice_mut().split_at_mut(size_of::<usize>());
+
         let edges_observer =
             HitcountsMapObserver::new(unsafe { StdMapObserver::new("edges", edges) })
                 .track_indices();
@@ -195,11 +215,19 @@ pub fn libafl_main() {
 
         // Custom correctness observer backed by a global no_mangle symbol
         let correctness_observer =
-            CorrectnessObserver::new_global(format!("correctness_{}", core_id.core_id().0));
+            CorrectnessObserver::new(step, format!("correctness_{}", core_id.core_id().0));
+
+        let stdout_observer = StdOutObserver::new(Cow::Borrowed("stdout")).unwrap();
+        let stderr_observer = StdErrObserver::new(Cow::Borrowed("stderr")).unwrap();
+
+        let stdout_feedback = StdOutToMetadataFeedback::new(&stdout_observer);
+        let stderr_feedback = StdErrToMetadataFeedback::new(&stderr_observer);
 
         // Feedback to rate the interestingness of an input
         // This one is composed by two Feedbacks in OR
         let mut feedback = feedback_or!(
+            stdout_feedback.clone(),
+            stderr_feedback.clone(),
             ReportCorrectnessFeedback::new(&correctness_observer),
             // New maximization map feedback linked to the edges observer and the feedback state
             MaxMapFeedback::new(&edges_observer),
@@ -208,7 +236,12 @@ pub fn libafl_main() {
         );
 
         // A feedback to choose if an input is a solution or not
-        let mut objective = feedback_or_fast!(CrashFeedback::new(), TimeoutFeedback::new());
+        let mut objective = feedback_or_fast!(
+            stdout_feedback,
+            stderr_feedback,
+            CrashFeedback::new(),
+            TimeoutFeedback::new(),
+        );
 
         // If not restarting, create a State from scratch
         let mut state = state.unwrap_or_else(|| {
@@ -232,33 +265,42 @@ pub fn libafl_main() {
         // A fuzzer with feedbacks and a corpus scheduler
         let mut fuzzer = StdFuzzer::new(scheduler, feedback, objective);
 
-        // The wrapped harness function, calling out to the LLVM-style harness
-        let mut harness = |input: &<CurrentConfig as FuzzerConfig>::Input| {
-            let bytes = CurrentConfig::run_harness(&mut init, input);
+        // // The wrapped harness function, calling out to the LLVM-style harness
+        // let mut harness = |input: &<CurrentConfig as FuzzerConfig>::Input| {
+        //     let bytes = CurrentConfig::run_harness(&mut init, input);
 
-            //unsafe {
-            //println!(">>> {}", std::str::from_utf8_unchecked(&bytes));
-            //}
-            unsafe { libfuzzer_test_one_input(bytes) };
-            ExitKind::Ok
-        };
+        //     //unsafe {
+        //     //println!(">>> {}", std::str::from_utf8_unchecked(&bytes));
+        //     //}
+        //     unsafe { libfuzzer_test_one_input(bytes) };
+        //     ExitKind::Ok
+        // };
 
-        // Create the executor for an in-process function with one observer for edge coverage and one for the execution time
-        let mut executor = InProcessExecutor::with_timeout(
-            &mut harness,
+        // // Create the executor for an in-process function with one observer for edge coverage and one for the execution time
+        // let mut executor = InProcessExecutor::with_timeout(
+        //     &mut harness,
+        //     tuple_list!(edges_observer, time_observer, correctness_observer),
+        //     &mut fuzzer,
+        //     &mut state,
+        //     &mut restarting_mgr,
+        //     opt.timeout,
+        // )?;
+
+        let mut executor = get_executor(
+            stdout_observer,
+            stderr_observer,
             tuple_list!(edges_observer, time_observer, correctness_observer),
-            &mut fuzzer,
-            &mut state,
-            &mut restarting_mgr,
-            opt.timeout,
+            shmem_description,
         )?;
+
+        let mut executor = NautilusUnparsingExecutor::new(&mut init, executor);
 
         // The actual target run starts here.
         // Call LLVMFUzzerInitialize() if present.
-        let args: Vec<String> = env::args().collect();
-        if unsafe { libfuzzer_initialize(&args) } == -1 {
-            println!("Warning: LLVMFuzzerInitialize failed with -1");
-        }
+        // let args: Vec<String> = env::args().collect();
+        // if unsafe { libfuzzer_initialize(&args) } == -1 {
+        //     println!("Warning: LLVMFuzzerInitialize failed with -1");
+        // }
 
         // In case the corpus is empty (on first run), reset
         if state.must_load_initial_inputs() {
@@ -281,7 +323,7 @@ pub fn libafl_main() {
                 CurrentConfig::mutator(&opt),
                 CurrentConfig::max_iterations()
             ),
-            StdMutationalStage::new(HavocScheduledMutator::new(havoc_mutations()))
+            // StdMutationalStage::new(HavocScheduledMutator::new(havoc_mutations())) // StdMutationalStage::new(NopMutator::new(libafl::mutators::MutationResult::Mutated))
         );
 
         println!("Let's fuzz!");

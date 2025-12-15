@@ -52,21 +52,26 @@ impl FuzzerConfig for FandangoConfig {
         )
         .unwrap();
         let mut generator = FandangoGenerator::new(module);
-        // let mut inputs = vec![];
-        let mut inputs = (0..NUM_GENERATED)
-            .map(|_i| {
-                generator
-                    .generate(&mut NopState::<BytesInput>::new())
-                    .unwrap()
-            })
-            .collect::<Vec<_>>();
+        let mut inputs = vec![];
+        // inputs.extend((0..NUM_GENERATED).map(|_i| {
+        //     generator
+        //         .generate(&mut NopState::<BytesInput>::new())
+        //         .unwrap()
+        // }));
         inputs.extend_from_slice(
             &read_corpus()
                 .iter()
                 .map(|x| BytesInput::new(x.clone()))
                 .collect::<Vec<_>>(),
         );
+        // inputs.push(BytesInput::new(vec![]));
         inputs
+        // vec![
+        //     BytesInput::new(b"int main() { return 0; }".to_vec()),
+        //     BytesInput::new(b";some_invalid_c_program with_more_stuff\";".to_vec()),
+        //     BytesInput::new(b";some_invalid_c_program with_more_stuff\";".to_vec()),
+        //     BytesInput::new(b";some_invalid_c_program with_more_stuff\";".to_vec()),
+        // ]
     }
 
     type Init = ();
