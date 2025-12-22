@@ -97,7 +97,7 @@ where
 
 impl Named for ReportCorrectnessFeedback {
     fn name(&self) -> &Cow<'static, str> {
-        &Cow::Borrowed("report_correctness")
+        &Cow::Borrowed("correctness")
     }
 }
 

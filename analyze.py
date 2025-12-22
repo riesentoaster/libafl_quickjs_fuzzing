@@ -48,7 +48,7 @@ for log in glob.glob("out/*-2/stats.json"):
                     continue
                 s = (
                     cs.get("user_stats", {})
-                    .get("report_correctness", {})
+                    .get("correctness", {})
                     .get("value", {})
                     .get("String", "")
                 )

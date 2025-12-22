@@ -10,7 +10,7 @@ name = "setup_guard_redirection"
 crate-type = ["cdylib"]
 
 [dependencies]
-libafl_targets = { version = "0.15.3", features = ["sancov_pcguard_edges"] }
-libafl_bolts = { version = "0.15.3" }
+libafl_targets = { version = "0.15.4", features = ["sancov_pcguard_edges"] }
+libafl_bolts = { version = "0.15.4" }
 libc = "0.2"
-serde_json = "1.0.116"
+serde_json = "1.0.146"

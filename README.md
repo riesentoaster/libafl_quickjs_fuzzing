@@ -1,26 +1,19 @@
-# LibAFL QuickJS Fuzzing Example
+# Compare Correctness of Inputs between Fuzzing Approches on `clang`
 
-An example fuzzer about how to fuzz a JS engine combinign Nautilus with Token-level fuzzing.
+## Build and Run
 
-## Prepare
-
-Make sure to have Rust nigthly installed and call the bash script to build everything.
+Install [cargo](https://rustup.rs), then just (`cargo install just`), then execute the following (this may take a minute — clang is a rather complex binary to build):
 
 ```
-bash ./build.sh
+just run
 ```
 
-You ready-to-use fuzzer is now `fuzz_eval`.
+I have tested this on Ubuntu 22.04.5. You will probably need some additional dependencies, at least:
+- clang
+- git
 
-## Run
+This will download and patch clang, then build it along with the fuzzer, and finally run the fuzzer. Check the [Justfile](./Justfile) for what exactly happens. To change the version of clang, change the variable at the top of [`Justfile`](./Justfile)
 
-To run the fuzzer, you must at least choose a TCP port for the broker and the cores in which you want to spawn the instances (you can list them individually like 0,1,2,3 or specify a range like 0-3).
+## Configure
 
-```
-./fuzz_eval --cores 0-12 --broker-port 1337
-```
-
-## Reproduce
-
-If you find crashes or you want to print an item of the corpus, use the `--repro` command line option of the fuzzer.
-
+Check the top of the main file [`src/main.rs`](./src/main.rs), where you can specify `CurrentConfig`. Re-compile the fuzzer to use the new config. 

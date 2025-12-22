@@ -1,94 +1,162 @@
 diff --git a/clang/lib/Frontend/CompilerInstance.cpp b/clang/lib/Frontend/CompilerInstance.cpp
-index 8ea9cf33..58f01250 100644
 --- a/clang/lib/Frontend/CompilerInstance.cpp
 +++ b/clang/lib/Frontend/CompilerInstance.cpp
-@@ -136,11 +136,9 @@ public:
-     // Track the first error encountered
-     if (DiagLevel >= DiagnosticsEngine::Error && ErrorStep == 0) {
-       ErrorStep = getStepFromCategory(Info.getID());
--      // Set diagnostic value to indicate we received an error
--      __afl_correctness_step = 150 + ErrorStep; // 151-172 for tracked errors (150+1 to 150+22)
--    } else if (ErrorStep == 0) {
--      // Received a diagnostic but not an error - set diagnostic value
--      __afl_correctness_step = 120; // Diagnostic received but not an error
+@@ -12,6 +12,8 @@
+ #include "clang/AST/Decl.h"
+ #include "clang/Basic/CharInfo.h"
+ #include "clang/Basic/Diagnostic.h"
++#include "clang/Basic/DiagnosticCategories.h"
++#include "clang/Basic/DiagnosticIDs.h"
+ #include "clang/Basic/DiagnosticOptions.h"
+ #include "clang/Basic/FileManager.h"
+ #include "clang/Basic/LangStandard.h"
+@@ -67,6 +69,100 @@
+
+ using namespace clang;
+
++// Global variable for tracking compilation step (C linkage to avoid name mangling)
++extern "C" {
++extern __attribute__((visibility("default"))) size_t __afl_correctness_step;
++}
++
++/// StepTrackingDiagConsumer - A diagnostic consumer that tracks the
++/// first error encountered during compilation and maps it to a step number
++/// based on the diagnostic category.
++class StepTrackingDiagConsumer : public DiagnosticConsumer {
++  size_t ErrorStep = 0;
++
++  size_t getStepFromCategory(unsigned DiagID) {
++    unsigned CatID = DiagnosticIDs::getCategoryNumberForDiag(DiagID);
++
++    // Map category enum to unique step number (starting from 1)
++    switch (CatID) {
++      case diag::DiagCat_None:
++        return 1;
++      case diag::DiagCat_Lexical_or_Preprocessor_Issue:
++        return 2;
++      case diag::DiagCat_Parse_Issue:
++        return 3;
++      case diag::DiagCat_AST_Deserialization_Issue:
++        return 4;
++      case diag::DiagCat_Modules_Issue:
++        return 5;
++      case diag::DiagCat_Semantic_Issue:
++        return 6;
++      case diag::DiagCat_Lambda_Issue:
++        return 7;
++      case diag::DiagCat_Coroutines_Issue:
++        return 8;
++      case diag::DiagCat_Concepts_Issue:
++        return 9;
++      case diag::DiagCat_Generics_Issue:
++        return 10;
++      case diag::DiagCat_ARC_Semantic_Issue:
++        return 11;
++      case diag::DiagCat_ARC_Weak_References:
++        return 12;
++      case diag::DiagCat_ARC_Restrictions:
++        return 13;
++      case diag::DiagCat_ARC_Retain_Cycle:
++        return 14;
++      case diag::DiagCat_ARC_and__properties:
++        return 15;
++      case diag::DiagCat_ARC_Casting_Rules:
++        return 16;
++      case diag::DiagCat_ARC_Parse_Issue:
++        return 17;
++      case diag::DiagCat_Inline_Assembly_Issue:
++        return 18;
++      case diag::DiagCat_Backend_Issue:
++        return 19;
++      case diag::DiagCat_AST_Serialization_Issue:
++        return 20;
++      default:
++        return 22; // Unknown category
++    }
++  }
++
++public:
++  void HandleDiagnostic(DiagnosticsEngine::Level DiagLevel,
++                        const Diagnostic &Info) override {
++    // Track the first error encountered
++    if (DiagLevel >= DiagnosticsEngine::Error && ErrorStep == 0) {
++      ErrorStep = getStepFromCategory(Info.getID());
 +      // Write directly to global variable immediately so it persists even if consumer is destroyed
 +      __afl_correctness_step = ErrorStep;
 +      __sync_synchronize(); // Ensure write is visible
-     }
-     // Always call the parent to ensure diagnostics are forwarded
-     DiagnosticConsumer::HandleDiagnostic(DiagLevel, Info);
-@@ -153,29 +151,16 @@ public:
- };
- 
- // Global pointer to the current tracking consumer (set during createDiagnostics)
++    }
++    // Always call the parent to ensure diagnostics are forwarded
++    DiagnosticConsumer::HandleDiagnostic(DiagLevel, Info);
++  }
++
++  size_t getStep() const {
++    // Return error step if error occurred, otherwise return 0 (no error tracked)
++    return ErrorStep;
++  }
++};
++
++// Global pointer to the current tracking consumer (set during createDiagnostics)
 +// This is set each time createDiagnostics() is called, so it should point to the
 +// most recent consumer created in the current compilation
- static StepTrackingDiagConsumer *CurrentStepTrackingConsumer = nullptr;
- 
- // C-linkage function that can be looked up dynamically via dlsym
--// Returns: 1-20 for tracked error steps, 22 for unknown error, 23 for success
--// Diagnostic values: 100=consumer not initialized, 101=consumer initialized but no errors tracked
++static StepTrackingDiagConsumer *CurrentStepTrackingConsumer = nullptr;
++
++// C-linkage function that can be looked up dynamically via dlsym
 +// Returns the value from the global variable (which is written directly by HandleDiagnostic)
 +// This function is mainly for compatibility - the global variable is the source of truth
- extern "C" size_t clang_get_compilation_step() {
--  // Set diagnostic to indicate function was called
--  __afl_correctness_step = 140; // Function called
--  
--  if (CurrentStepTrackingConsumer) {
--    __afl_correctness_step = 141; // Consumer pointer is not null
--    size_t step = CurrentStepTrackingConsumer->getStep();
--    if (step != 0) {
--      __afl_correctness_step = 142; // Error step found
--      return step; // Error was tracked (1-20 or 22)
--    }
--    // No error tracked - return diagnostic value to indicate consumer is working
--    __afl_correctness_step = 101; // Consumer initialized but no errors tracked
--    return 101;
--  }
--  // Consumer not initialized - return diagnostic value
--  __afl_correctness_step = 100; // Consumer not initialized
--  return 100;
++extern "C" size_t clang_get_compilation_step() {
 +  __sync_synchronize(); // Ensure we see the latest value
 +  return __afl_correctness_step;
- }
- 
++}
++
  CompilerInstance::CompilerInstance(
-@@ -487,12 +472,10 @@ IntrusiveRefCntPtr<DiagnosticsEngine> CompilerInstance::createDiagnostics(
-   // This must be done after other consumers are chained so it receives all diagnostics
-   auto *StepTracker = new StepTrackingDiagConsumer();
-   CurrentStepTrackingConsumer = StepTracker;
--  // Set diagnostic value to indicate consumer was created
--  __afl_correctness_step = 110; // Consumer created
+     std::shared_ptr<CompilerInvocation> Invocation,
+     std::shared_ptr<PCHContainerOperations> PCHContainerOps,
+@@ -372,6 +468,15 @@
+   if (!Opts.DiagnosticSerializationFile.empty())
+     SetupSerializedDiagnostics(Opts, *Diags, Opts.DiagnosticSerializationFile);
+
++  // Chain in step tracking consumer for correctness tracking (e.g., fuzzing)
++  // This must be done after other consumers are chained so it receives all diagnostics
++  auto *StepTracker = new StepTrackingDiagConsumer();
++  CurrentStepTrackingConsumer = StepTracker;
 +  __sync_synchronize(); // Ensure pointer is visible
 +  // Don't modify global variable here - let cc1_main set the final value
-   Diags->setClient(new ChainedDiagnosticConsumer(
-       Diags->takeClient(), std::unique_ptr<DiagnosticConsumer>(StepTracker)));
--  // Set diagnostic value to indicate consumer was added to chain
--  __afl_correctness_step = 111; // Consumer added to chain
- 
++  Diags->setClient(new ChainedDiagnosticConsumer(
++      Diags->takeClient(), std::unique_ptr<DiagnosticConsumer>(StepTracker)));
++
    // Configure our handling of diagnostics.
    ProcessWarningOptions(*Diags, Opts, VFS);
+
 diff --git a/clang/tools/driver/cc1_main.cpp b/clang/tools/driver/cc1_main.cpp
-index f7b86c51..b2300eb6 100644
 --- a/clang/tools/driver/cc1_main.cpp
 +++ b/clang/tools/driver/cc1_main.cpp
-@@ -224,8 +224,7 @@ static int PrintEnabledExtensions(const TargetOptions& TargetOpts) {
+@@ -60,6 +60,13 @@
+ using namespace clang;
+ using namespace llvm::opt;
+
++// Global variable for tracking compilation step (C linkage to avoid name mangling)
++// Defined in CompilerInstance.cpp, declared here for access
++extern "C" size_t __afl_correctness_step;
++
++// Function to get compilation step from CompilerInstance
++extern "C" size_t clang_get_compilation_step();
++
+ //===----------------------------------------------------------------------===//
+ // Main driver
+ //===----------------------------------------------------------------------===//
+@@ -216,6 +223,8 @@
+
  int cc1_main(ArrayRef<const char *> Argv, const char *Argv0, void *MainAddr) {
    ensureSufficientStack();
-   
--  // Initialize global variable at start - set diagnostic value
--  __afl_correctness_step = 50; // cc1_main started
++
 +  // Don't initialize global variable here - only set it once at the end with final value
- 
+
    IntrusiveRefCntPtr<DiagnosticIDs> DiagID = DiagnosticIDs::create();
- 
-@@ -285,11 +284,13 @@ int cc1_main(ArrayRef<const char *> Argv, const char *Argv0, void *MainAddr) {
-   Clang->createVirtualFileSystem(llvm::vfs::getRealFileSystem(), DiagsBuffer);
- 
+
+@@ -276,8 +285,12 @@
+
    // Create the actual diagnostics engine.
--  __afl_correctness_step = 51; // About to create diagnostics
    Clang->createDiagnostics();
--  __afl_correctness_step = 52; // Diagnostics created
 -  if (!Clang->hasDiagnostics())
 +  if (!Clang->hasDiagnostics()) {
 +    // Set value to indicate diagnostics creation failed
@@ -96,11 +164,11 @@ index f7b86c51..b2300eb6 100644
 +    __sync_synchronize();
      return 1;
 +  }
- 
+
    // Set an error handler, so that any LLVM backend diagnostics go through our
    // error handler.
-@@ -298,12 +299,20 @@ int cc1_main(ArrayRef<const char *> Argv, const char *Argv0, void *MainAddr) {
- 
+@@ -286,6 +299,15 @@
+
    DiagsBuffer->FlushDiagnostics(Clang->getDiagnostics());
    if (!Success) {
 +    // Check if an error was already written to the global variable
@@ -115,181 +183,118 @@ index f7b86c51..b2300eb6 100644
      Clang->getDiagnosticClient().finish();
      return 1;
    }
- 
-   // Execute the frontend actions.
--  __afl_correctness_step = 53; // About to execute compilation
-   {
-     llvm::TimeTraceScope TimeScope("ExecuteCompiler");
-     bool TimePasses = Clang->getCodeGenOpts().TimePasses;
-@@ -312,7 +321,6 @@ int cc1_main(ArrayRef<const char *> Argv, const char *Argv0, void *MainAddr) {
-     llvm::TimeRegion Timer(TimePasses ? &Clang->getFrontendTimer() : nullptr);
-     Success = ExecuteCompilerInvocation(Clang.get());
-   }
--  __afl_correctness_step = 54; // Compilation completed
- 
-   // If any timers were active but haven't been destroyed yet, print their
-   // results now.  This happens in -disable-free mode.
-@@ -343,33 +351,27 @@ int cc1_main(ArrayRef<const char *> Argv, const char *Argv0, void *MainAddr) {
+@@ -329,6 +351,28 @@
    // later errors use the default handling behavior instead.
    llvm::remove_fatal_error_handler();
- 
--  // Get the compilation step using the function (can be looked up dynamically)
--  // The function returns: 1-20 (tracked error), 22 (unknown error), 23 (success), 
--  // or diagnostic values: 100=not initialized, 101=no errors tracked
--  size_t step = clang_get_compilation_step();
+
 +  // Check if an error was already written to the global variable by HandleDiagnostic
 +  // If not (value is still 0), determine the final result based on compilation outcome
 +  __sync_synchronize(); // Ensure we see the latest value
 +  size_t step = __afl_correctness_step;
-   
--  // Set diagnostic value to indicate we're in cc1_main after compilation
--  __afl_correctness_step = 130; // In cc1_main after compilation
--  
--  // If step is a diagnostic value (>= 100) or 23 (default success), check actual compilation result
--  if (step >= 100 || step == 23) {
++
 +  // If no error was tracked (step is still 0), determine final result
 +  if (step == 0) {
 +    // No error was detected by HandleDiagnostic, check compilation result
-     unsigned numErrors = Clang->getDiagnostics().getNumErrors();
-     if (numErrors > 0) {
--      step = 22; // Unknown error category
--      __afl_correctness_step = 131; // Errors found but not tracked
++    unsigned numErrors = Clang->getDiagnostics().getNumErrors();
++    if (numErrors > 0) {
 +      step = 22; // Unknown error category (errors occurred but weren't tracked)
-     } else if (Success) {
-       step = 23; // Success
--      __afl_correctness_step = 132; // Success confirmed
-     } else {
-       step = 22; // Failed but no errors tracked
--      __afl_correctness_step = 133; // Failed but no errors
-     }
-   }
--  
--  // Store final value in global variable for direct access
++    } else if (Success) {
++      step = 23; // Success
++    } else {
++      step = 22; // Failed but no errors tracked
++    }
++  }
 +  // Always write the final value to global variable (even if it was already set by HandleDiagnostic)
 +  // This ensures the value is set even if there are any issues
-   __afl_correctness_step = step;
--  // Ensure the write is visible to other threads/processes
--  __sync_synchronize();
++  __afl_correctness_step = step;
 +  __sync_synchronize(); // Ensure the write is visible
- 
++
    // When running with -disable-free, don't do any destruction or shutdown.
    if (Clang->getFrontendOpts().DisableFree) {
+     llvm::BuryPointer(std::move(Clang));
 diff --git a/clang/tools/driver/driver.cpp b/clang/tools/driver/driver.cpp
-index b7ffd7fe..dbf2cc31 100644
 --- a/clang/tools/driver/driver.cpp
 +++ b/clang/tools/driver/driver.cpp
-@@ -225,14 +225,8 @@ static int ExecuteCC1Tool(SmallVectorImpl<const char *> &ArgV,
+@@ -59,6 +59,9 @@
+ using namespace clang::driver;
+ using namespace llvm::opt;
+
++// Declare global variable for diagnostic tracking (defined in CompilerInstance.cpp)
++extern "C" size_t __afl_correctness_step;
++
+ std::string GetExecutablePath(const char *Argv0, bool CanonicalPrefixes) {
+   if (!CanonicalPrefixes) {
+     SmallString<128> ExecutablePath(Argv0);
+@@ -221,8 +224,10 @@
+   }
    StringRef Tool = ArgV[1];
    void *GetExecutablePathVP = (void *)(intptr_t)GetExecutablePath;
-   if (Tool == "-cc1") {
--    // Set diagnostic value before calling cc1_main
--    __afl_correctness_step = 40; // About to call cc1_main
--    __sync_synchronize();
--    int result = cc1_main(ArrayRef(ArgV).slice(1), ArgV[0], GetExecutablePathVP);
--    // Set diagnostic value after cc1_main returns
--    __afl_correctness_step = 42; // cc1_main returned
--    __sync_synchronize();
--    return result;
+-  if (Tool == "-cc1")
++  if (Tool == "-cc1") {
 +    // Don't modify global variable - let cc1_main set the final value
-+    return cc1_main(ArrayRef(ArgV).slice(1), ArgV[0], GetExecutablePathVP);
-   }
+     return cc1_main(ArrayRef(ArgV).slice(1), ArgV[0], GetExecutablePathVP);
++  }
    if (Tool == "-cc1as")
      return cc1as_main(ArrayRef(ArgV).slice(2), ArgV[0], GetExecutablePathVP);
-@@ -247,8 +241,7 @@ static int ExecuteCC1Tool(SmallVectorImpl<const char *> &ArgV,
+   if (Tool == "-cc1gen-reproducer")
+@@ -236,6 +241,8 @@
  }
- 
+
  int clang_main(int Argc, char **Argv, const llvm::ToolContext &ToolContext) {
--  // Initialize global variable for diagnostic tracking
--  __afl_correctness_step = 30; // clang_main started
 +  // Don't modify global variable - let cc1_main set the final value
-   
++
    noteBottomOfStack();
    llvm::setBugReportMsg("PLEASE submit a bug report to " BUG_REPORT_URL
-@@ -382,38 +375,17 @@ int clang_main(int Argc, char **Argv, const llvm::ToolContext &ToolContext) {
- 
+                         " and include the crash backtrace, preprocessed "
+@@ -318,7 +325,9 @@
+   // should spawn a new clang subprocess (old behavior).
+   // Not having an additional process saves some execution time of Windows,
+   // and makes debugging and profiling easier.
+-  bool UseNewCC1Process = CLANG_SPAWN_CC1;
++  // Force integrated mode for correctness tracking (fuzzing) - we need to read
++  // the global variable from the same process that does the compilation
++  bool UseNewCC1Process = false; // Force integrated mode for fuzzing
+   for (const char *Arg : Args)
+     UseNewCC1Process = llvm::StringSwitch<bool>(Arg)
+                            .Case("-fno-integrated-cc1", true)
+@@ -366,6 +375,7 @@
+
    auto ExecuteCC1WithContext = [&ToolContext,
                                  &VFS](SmallVectorImpl<const char *> &ArgV) {
--    // Set diagnostic value before calling ExecuteCC1Tool
--    __afl_correctness_step = 40; // About to call ExecuteCC1Tool via callback
--    __sync_synchronize(); // Ensure write is visible
--    int result = ExecuteCC1Tool(ArgV, ToolContext, VFS);
--    // Set diagnostic value after ExecuteCC1Tool returns
--    __afl_correctness_step = 41; // ExecuteCC1Tool returned
--    __sync_synchronize();
--    return result;
 +    // Don't modify global variable - let cc1_main set the final value
-+    return ExecuteCC1Tool(ArgV, ToolContext, VFS);
+     return ExecuteCC1Tool(ArgV, ToolContext, VFS);
    };
    if (!UseNewCC1Process) {
-     TheDriver.CC1Main = ExecuteCC1WithContext;
--    __afl_correctness_step = 37; // Callback set for integrated cc1 mode
--    __sync_synchronize();
-     // Ensure the CC1Command actually catches cc1 crashes
+@@ -374,6 +384,7 @@
      llvm::CrashRecoveryContext::Enable();
--  } else {
--    __afl_correctness_step = 38; // Using subprocess mode (not expected for fuzzing)
--    __sync_synchronize();
    }
- 
--  __afl_correctness_step = 31; // About to build compilation
--  __sync_synchronize();
+
 +  // Don't modify global variable - let cc1_main set the final value
    std::unique_ptr<Compilation> C(TheDriver.BuildCompilation(Args));
--  __sync_synchronize();
--  if (C && !C->getJobs().empty()) {
--    __afl_correctness_step = 32; // Compilation built with jobs
--  } else if (C) {
--    __afl_correctness_step = 39; // Compilation built but no jobs
--  } else {
--    __afl_correctness_step = 36; // Compilation build failed (null)
--  }
--  __sync_synchronize();
- 
+
    Driver::ReproLevel ReproLevel = Driver::ReproLevel::OnCrash;
-   if (Arg *A = C->getArgs().getLastArg(options::OPT_gen_reproducer_eq)) {
-@@ -441,25 +413,12 @@ int clang_main(int Argc, char **Argv, const llvm::ToolContext &ToolContext) {
+@@ -400,10 +411,13 @@
+   Driver::CommandStatus CommandStatus = Driver::CommandStatus::Ok;
+   // Pretend the first command failed if ReproStatus is Always.
    const Command *FailingCommand = nullptr;
-   SmallVector<std::pair<int, const Command *>, 4> FailingCommands;
-   if (!C || C->containsError()) {
--    // Compilation failed to build - value already set above (36 or 39)
--    // Don't overwrite it
+-  if (!C->getJobs().empty())
+-    FailingCommand = &*C->getJobs().begin();
+-  if (C && !C->containsError()) {
+-    SmallVector<std::pair<int, const Command *>, 4> FailingCommands;
++  SmallVector<std::pair<int, const Command *>, 4> FailingCommands;
++  if (!C || C->containsError()) {
 +    // Compilation failed to build - don't modify global variable
-   } else {
-     if (!C->getJobs().empty())
-       FailingCommand = &*C->getJobs().begin();
--    // Only execute if we have jobs and value indicates we should (32 = has jobs)
--    if (__afl_correctness_step == 32) {
--      __afl_correctness_step = 33; // About to execute compilation
--      __sync_synchronize();
--      Res = TheDriver.ExecuteCompilation(*C, FailingCommands);
--      __sync_synchronize();
--      // Check if cc1_main was called (value should be >= 50 if it was)
--      if (__afl_correctness_step < 50) {
--        __afl_correctness_step = 34; // Compilation executed but cc1_main was not called
--      } else {
--        __afl_correctness_step = 34; // Compilation executed, cc1_main was called
--      }
--      __sync_synchronize();
--    }
++  } else {
++    if (!C->getJobs().empty())
++      FailingCommand = &*C->getJobs().begin();
 +    // Don't modify global variable - let cc1_main set the final value
-+    Res = TheDriver.ExecuteCompilation(*C, FailingCommands);
- 
+     Res = TheDriver.ExecuteCompilation(*C, FailingCommands);
+
      for (const auto &P : FailingCommands) {
-       int CommandRes = P.first;
-@@ -521,15 +480,7 @@ int clang_main(int Argc, char **Argv, const llvm::ToolContext &ToolContext) {
- 
+@@ -466,5 +480,7 @@
+
    // If we have multiple failing commands, we return the result of the first
    // failing command.
--  // Preserve diagnostic values - only set 35 if value is uninitialized (< 30)
--  // Diagnostic values: 30=started, 31=build start, 32=has jobs, 33=exec start, 34=exec done,
--  // 36=build failed, 37=callback set, 38=subprocess mode, 39=no jobs, 40-42=cc1 flow, 50+=cc1_main
--  if (__afl_correctness_step < 30) {
--    // Value is uninitialized - set to 35 to indicate clang_main ended without cc1_main
--    __afl_correctness_step = 35; // clang_main ending, cc1_main was not called, unknown state
--  }
--  // Otherwise, preserve the diagnostic value (30-49) so we can see what happened
--  // If value is >= 50, it means cc1_main was called, so preserve that too
--  __sync_synchronize();
 +  // Don't modify global variable - let cc1_main set the final value
 +  // If cc1_main was not called, the value will remain 0, which is fine
    return Res;

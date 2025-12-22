@@ -23,12 +23,7 @@ impl FuzzerConfig for FandangoConfig {
     type Mutator = FandangoPseudoMutator;
 
     fn mutator(opt: &crate::Opt) -> Self::Mutator {
-        let module = FandangoPythonModule::new(
-            "./fandango_harness.py",
-            opt.grammar_file.to_str().unwrap(),
-            &[],
-        )
-        .unwrap();
+        let module = FandangoPythonModule::new(opt.grammar_file.to_str().unwrap(), &[]).unwrap();
         FandangoPseudoMutator::new(module)
     }
 
@@ -45,12 +40,7 @@ impl FuzzerConfig for FandangoConfig {
     type Input = BytesInput;
 
     fn initial_inputs(_init: &mut Self::Init, opt: &crate::Opt) -> Vec<Self::Input> {
-        let module = FandangoPythonModule::new(
-            "./fandango_harness.py",
-            opt.grammar_file.to_str().unwrap(),
-            &[],
-        )
-        .unwrap();
+        let module = FandangoPythonModule::new(opt.grammar_file.to_str().unwrap(), &[]).unwrap();
         let mut generator = FandangoGenerator::new(module);
         let mut inputs = vec![];
         // inputs.extend((0..NUM_GENERATED).map(|_i| {

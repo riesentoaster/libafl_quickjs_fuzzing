@@ -30,7 +30,7 @@ use libafl::{
     },
     stages::mutational::StdMutationalStage,
     state::StdState,
-    Error, StdFuzzer,
+    BloomInputFilter, Error, ReportingInputFilter, StdFuzzer,
 };
 use libafl_bolts::{
     core_affinity::Cores,
@@ -125,7 +125,7 @@ static TARGET_BINARY: &str = "./llvm/build/bin/clang";
 const NUM_GENERATED: usize = 4096;
 const CORPUS_CACHE: usize = 4096;
 
-type CurrentConfig = config::NautilusConfig;
+type CurrentConfig = config::FandangoConfig;
 /// The main fn, `no_mangle` as it is a C symbol
 // #[no_mangle]
 #[allow(clippy::too_many_lines)]
@@ -263,7 +263,12 @@ pub fn main() {
         let scheduler = CurrentConfig::scheduler(&edges_observer);
 
         // A fuzzer with feedbacks and a corpus scheduler
-        let mut fuzzer = StdFuzzer::new(scheduler, feedback, objective);
+        let mut fuzzer = StdFuzzer::builder()
+            .input_filter(ReportingInputFilter::new(BloomInputFilter::default(), 100))
+            .scheduler(scheduler)
+            .feedback(feedback)
+            .objective(objective)
+            .build();
 
         // // The wrapped harness function, calling out to the LLVM-style harness
         // let mut harness = |input: &<CurrentConfig as FuzzerConfig>::Input| {
@@ -293,7 +298,7 @@ pub fn main() {
             shmem_description,
         )?;
 
-        let mut executor = NautilusUnparsingExecutor::new(&mut init, executor);
+        // let mut executor = NautilusUnparsingExecutor::new(&mut init, executor);
 
         // The actual target run starts here.
         // Call LLVMFUzzerInitialize() if present.
